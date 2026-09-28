@@ -12,6 +12,7 @@
  Copyright (C) 2017 Klaus Spanderen
  Copyright (C) 2019 Wojciech Ślusarski
  Copyright (C) 2020 Marcin Rybacki
+ Copyright (C) 2026 Azra Bano
 
  This file is part of QuantLib, a free-software/open-source library
  for financial quantitative analysts and developers - http://quantlib.org/
@@ -225,6 +226,39 @@ namespace QuantLib {
                                        Real omega = 1.0,
                                        Real accuracy = 1.0e-6,
                                        Natural maxIterations = 100);
+
+    /*! Black 1976 implied standard deviation,
+        i.e. volatility*sqrt(timeToMaturity)
+
+        It is calculated using
+
+        "Let's Be Rational"
+        P. Jäckel, Wilmott (2015), pp. 40-53,
+        https://doi.org/10.1002/wilm.10395
+
+        which inverts the normalised Black function to (close to)
+        machine precision with a rational initial guess followed by
+        at most two third-order Householder iterations. Unlike
+        blackFormulaImpliedStdDev(), no accuracy or iteration count
+        has to be given.
+
+        A price equal to the intrinsic value gives 0; the function
+        throws for prices below the intrinsic value or not below the
+        undiscounted upper bound (forward for calls, strike for puts),
+        where no solution exists.
+    */
+    Real blackFormulaImpliedStdDevLetsBeRational(Option::Type optionType,
+                                                 Real strike,
+                                                 Real forward,
+                                                 Real blackPrice,
+                                                 Real discount = 1.0,
+                                                 Real displacement = 0.0);
+
+    Real blackFormulaImpliedStdDevLetsBeRational(const ext::shared_ptr<PlainVanillaPayoff>& payoff,
+                                                 Real forward,
+                                                 Real blackPrice,
+                                                 Real discount = 1.0,
+                                                 Real displacement = 0.0);
 
     /*! Black 1976 probability of being in the money (in the bond martingale
         measure), i.e. N(d2).

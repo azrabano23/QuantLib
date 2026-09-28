@@ -17,6 +17,7 @@ this_include_HEADERS = \
     genericmodelengine.hpp \
     greeks.hpp \
     latticeshortratemodelengine.hpp \
+    letsberational.hpp \
     mclongstaffschwartzengine.hpp \
     mcsimulation.hpp
 
@@ -28,7 +29,8 @@ cpp_files = \
     bacheliercalculator.cpp \
 	blackformula.cpp \
 	blackscholescalculator.cpp \
-	greeks.cpp
+	greeks.cpp \
+	letsberational.cpp
 
 if UNITY_BUILD
 

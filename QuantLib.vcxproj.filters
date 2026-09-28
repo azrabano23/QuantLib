@@ -2481,6 +2481,9 @@
     <ClInclude Include="ql\pricingengines\latticeshortratemodelengine.hpp">
       <Filter>pricingengines</Filter>
     </ClInclude>
+    <ClInclude Include="ql\pricingengines\letsberational.hpp">
+      <Filter>pricingengines</Filter>
+    </ClInclude>
     <ClInclude Include="ql\pricingengines\mclongstaffschwartzengine.hpp">
       <Filter>pricingengines</Filter>
     </ClInclude>
@@ -5967,6 +5970,9 @@
       <Filter>pricingengines</Filter>
     </ClCompile>
     <ClCompile Include="ql\pricingengines\greeks.cpp">
+      <Filter>pricingengines</Filter>
+    </ClCompile>
+    <ClCompile Include="ql\pricingengines\letsberational.cpp">
       <Filter>pricingengines</Filter>
     </ClCompile>
     <ClCompile Include="ql\pricingengines\asian\analytic_cont_geom_av_price.cpp">

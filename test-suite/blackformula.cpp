@@ -5,6 +5,7 @@
  Copyright (C) 2015, 2024 Peter Caspers
  Copyright (C) 2017 Klaus Spanderen
  Copyright (C) 2020 Marcin Rybacki
+ Copyright (C) 2026 Azra Bano
 
  This file is part of QuantLib, a free-software/open-source library
  for financial quantitative analysts and developers - http://quantlib.org/
@@ -24,7 +25,9 @@
 #include "toplevelfixture.hpp"
 #include "utilities.hpp"
 #include <ql/pricingengines/blackformula.hpp>
+#include <ql/pricingengines/letsberational.hpp>
 #include <cmath>
+#include <iomanip>
 
 using namespace QuantLib;
 using namespace boost::unit_test_framework;
@@ -510,6 +513,441 @@ BOOST_AUTO_TEST_CASE(testDeepInTheMoneyPricesNotBelowIntrinsic) {
                             << " is below intrinsic by " << intrinsic - bachelier);
         }
     }
+}
+
+namespace {
+
+    struct LetsBeRationalCase {
+        Real price, stdDev, conditioning;
+        bool resolvable;
+    };
+
+    /* Accurate Black price for a given strike, forward and total standard
+       deviation, built from the normalised Black function so that the
+       round trip is not limited by cancellation in the Black formula.  The
+       conditioning is the factor by which a relative error in the price is
+       amplified in the implied standard deviation. */
+    LetsBeRationalCase letsBeRationalCase(Option::Type type,
+                                          Real strike,
+                                          Real forward,
+                                          Real stdDev,
+                                          Real discount,
+                                          Real displacement) {
+        const Real k = strike + displacement, f = forward + displacement;
+        // accurate log-moneyness of the given strike and forward
+        const Real x = (k <= 2.0 * f && f <= 2.0 * k) ? std::log1p((f - k) / k) : std::log(f / k);
+        const Real theta = (type == Option::Call) ? 1.0 : -1.0;
+        const Real intrinsic = std::max(theta * (f - k), Real(0.0));
+        const Real otm =
+            std::sqrt(f) * std::sqrt(k) * detail::normalisedBlackCall(-std::fabs(x), stdDev);
+        const Real undiscounted = intrinsic + otm;
+        const Real price = discount * undiscounted;
+        const Real vega = std::sqrt(f) * std::sqrt(k) * detail::normalisedVega(x, stdDev);
+        const Real upperBound = (type == Option::Call) ? f : k;
+        // subnormal prices, prices rounding to intrinsic or to the upper
+        // bound do not determine the standard deviation
+        const bool resolvable = otm > QL_MIN_POSITIVE_REAL / QL_EPSILON &&
+                                price / discount > intrinsic && undiscounted < upperBound;
+        return {price, stdDev, std::max(Real(1.0), undiscounted / (stdDev * vega)), resolvable};
+    }
+
+}
+
+BOOST_AUTO_TEST_CASE(testLetsBeRationalNormalisedBlack) {
+
+    BOOST_TEST_MESSAGE("Testing the normalised Black function used by Let's Be Rational...");
+
+    // reference values computed with 50-digit arithmetic, covering the four
+    // evaluation branches (asymptotic expansion, small-t expansion, direct
+    // formula, erfcx-based formula)
+    struct Case {
+        Real x, s, expected;
+    };
+    const Case cases[] = {
+        {-30.0, 1.0, 1.4405938487063514186e-199},    {-12.0, 1.0, 1.2910437115451598069e-34},
+        {-15.0, 1.2, 2.9623898007235195834e-37},     {-1.0, 0.1, 7.4653976115686172329e-26},
+        {-0.001, 0.0001, 7.4745602454210835492e-29}, {0.0, 1e-8, 3.9894228040143268462e-9},
+        {-0.1, 2.0, 0.63412712270593895706},         {0.0, 3.0, 0.86638559746228386799},
+        {-30.0, 4.0, 2.3782760139263438428e-15},     {-3.0, 1.0, 0.00034299241765225832057},
+        {-1.0, 0.5, 0.0041423587506785749349},       {-10.0, 5.0, 0.0041547780138823765422},
+        {-5.0, 1.5, 0.00013118738389704313023},      {-4.5, 0.45, 3.2810356800176665841e-25},
+        {-20.0, 2.0, 9.152756597844069956e-25},      {0.001, 0.0001, 0.0010000000416666672083},
+        {1e-5, 0.1, 0.039882611876465373266}};
+
+    // The error is a few tens of ulps at most where the result is tiny: the
+    // exponential of a large argument cannot be more accurate than that, and
+    // the small-t expansion has some cancellation in its leading
+    // coefficient, as documented in the reference implementation. The
+    // plain Black formula would lose several hundred ulps at some of the
+    // points above.
+    const Real tolerance = 1.0e-14;
+
+    for (const Case& c : cases) {
+        const Real b = detail::normalisedBlackCall(c.x, c.s);
+        const Real error = std::fabs(b - c.expected) / c.expected;
+        if (error > tolerance)
+            BOOST_ERROR("failed to reproduce normalised Black price"
+                        << std::setprecision(17) << "\n x:          " << c.x
+                        << "\n s:          " << c.s << "\n calculated: " << b
+                        << "\n expected:   " << c.expected << "\n rel. error: " << error);
+
+        // put-call symmetry b(x) = b(-x) + intrinsic
+        const Real symmetric =
+            detail::normalisedBlackCall(-c.x, c.s) + (std::exp(0.5 * c.x) - std::exp(-0.5 * c.x));
+        if (std::fabs(symmetric - b) >
+            1.0e-15 * std::max(Real(1.0), std::exp(0.5 * std::fabs(c.x))))
+            BOOST_ERROR("normalised Black function violates put-call parity"
+                        << std::setprecision(17) << "\n x: " << c.x << "\n s: " << c.s
+                        << "\n b(x):  " << b << "\n b(-x) + intrinsic: " << symmetric);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(testLetsBeRationalRoundTrip) {
+
+    BOOST_TEST_MESSAGE("Testing Let's Be Rational implied standard deviation "
+                       "round trip on a wide grid...");
+
+    const Real forward = 100.0, discount = 0.97;
+    const Real logMoneyness[] = {-30.0, -20.0, -10.0, -5.0, -3.0, -1.0, -0.5, -0.1,
+                                 -0.01, -1e-3, -1e-5, 0.0,  1e-5, 1e-3, 0.01, 0.1,
+                                 0.5,   1.0,   3.0,   5.0,  10.0, 20.0, 30.0};
+    const Real stdDevs[] = {1e-8, 1e-6, 1e-4, 1e-3, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 3.0, 5.0};
+
+    // The result is exact up to a few ulps of the price, amplified by the
+    // conditioning of the inversion.
+    const Real tolerance = 32 * QL_EPSILON;
+
+    Size checked = 0;
+    for (auto type : {Option::Call, Option::Put}) {
+        for (Real x : logMoneyness) {
+            const Real strike = forward * std::exp(-x);
+            for (Real stdDev : stdDevs) {
+                const LetsBeRationalCase c =
+                    letsBeRationalCase(type, strike, forward, stdDev, discount, 0.0);
+                if (!c.resolvable)
+                    continue;
+                ++checked;
+                const Real implied = blackFormulaImpliedStdDevLetsBeRational(type, strike, forward,
+                                                                             c.price, discount);
+                const Real error = std::fabs(implied - stdDev) / stdDev;
+                if (error > tolerance * c.conditioning)
+                    BOOST_ERROR("failed to recover standard deviation"
+                                << std::setprecision(17) << "\n type:         " << type
+                                << "\n strike:       " << strike << "\n forward:      " << forward
+                                << "\n price:        " << c.price << "\n stdDev:       " << stdDev
+                                << "\n implied:      " << implied << "\n rel. error:   " << error
+                                << "\n conditioning: " << c.conditioning);
+            }
+        }
+    }
+    // make sure that the grid is not mostly skipped
+    BOOST_CHECK(checked > 300);
+
+    // at the normalised level, two Householder iterations suffice everywhere:
+    // further iterations do not change the result
+    for (Real x : logMoneyness) {
+        for (Real stdDev : stdDevs) {
+            const Real b = detail::normalisedBlackCall(-std::fabs(x), stdDev);
+            if (b <= QL_MIN_POSITIVE_REAL / QL_EPSILON)
+                continue;
+            Size iterations = 0;
+            const Real implied = detail::normalisedImpliedStdDevLetsBeRational(
+                b, -std::fabs(x), Option::Call, 100, &iterations);
+            // without the limit, the iteration stops by itself once the
+            // steps are at round-off level
+            if (iterations >= 10)
+                BOOST_ERROR("no convergence without iteration limit for x = "
+                            << -std::fabs(x) << ", stdDev = " << stdDev);
+            const Real limited =
+                detail::normalisedImpliedStdDevLetsBeRational(b, -std::fabs(x), Option::Call);
+            // a third iteration, if any, does not change the result materially
+            const Real difference = std::fabs(implied - limited) / implied;
+            if (difference > 64 * QL_EPSILON)
+                BOOST_ERROR("two iterations are not enough for x = "
+                            << -std::fabs(x) << ", stdDev = " << stdDev << ": relative difference "
+                            << difference);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(testLetsBeRationalWithDisplacement) {
+
+    BOOST_TEST_MESSAGE("Testing Let's Be Rational implied standard deviation "
+                       "with displacement...");
+
+    struct Case {
+        Real strike, forward, displacement;
+    };
+    // negative rates made admissible by the displacement
+    const Case cases[] = {{-0.005, 0.01, 0.03}, {0.01, -0.005, 0.03}, {-0.01, -0.01, 0.02},
+                          {0.02, 0.015, 0.0},   {100.0, 80.0, 25.0},  {-0.029, 0.05, 0.03}};
+    const Real stdDevs[] = {0.001, 0.05, 0.2, 1.0, 2.5};
+    const Real discount = 0.9;
+
+    for (const Case& c : cases) {
+        for (auto type : {Option::Call, Option::Put}) {
+            for (Real stdDev : stdDevs) {
+                // consistency with QuantLib's Black formula...
+                const Real price =
+                    blackFormula(type, c.strike, c.forward, stdDev, discount, c.displacement);
+                const Real implied = blackFormulaImpliedStdDevLetsBeRational(
+                    type, c.strike, c.forward, price, discount, c.displacement);
+                const Real repriced =
+                    blackFormula(type, c.strike, c.forward, implied, discount, c.displacement);
+                // the Black formula has an absolute round-off error
+                // proportional to the (shifted) forward
+                if (std::fabs(repriced - price) > 1.0e-13 * (c.forward + c.displacement))
+                    BOOST_ERROR("failed to reprice with displacement"
+                                << std::setprecision(17) << "\n type:         " << type
+                                << "\n strike:       " << c.strike << "\n forward:      "
+                                << c.forward << "\n displacement: " << c.displacement
+                                << "\n stdDev:       " << stdDev << "\n implied:      " << implied
+                                << "\n price:        " << price << "\n repriced:     " << repriced);
+
+                // ...and the round trip on accurate prices
+                const LetsBeRationalCase lbr =
+                    letsBeRationalCase(type, c.strike, c.forward, stdDev, discount, c.displacement);
+                if (!lbr.resolvable)
+                    continue;
+                const Real exact = blackFormulaImpliedStdDevLetsBeRational(
+                    type, c.strike, c.forward, lbr.price, discount, c.displacement);
+                const Real error = std::fabs(exact - stdDev) / stdDev;
+                if (error > 32 * QL_EPSILON * lbr.conditioning)
+                    BOOST_ERROR("failed to recover standard deviation with displacement"
+                                << std::setprecision(17) << "\n type:         " << type
+                                << "\n strike:       " << c.strike << "\n forward:      "
+                                << c.forward << "\n displacement: " << c.displacement
+                                << "\n stdDev:       " << stdDev << "\n implied:      " << exact
+                                << "\n rel. error:   " << error);
+            }
+        }
+    }
+
+    // the payoff overload agrees
+    const auto payoff = ext::make_shared<PlainVanillaPayoff>(Option::Put, -0.005);
+    const Real price = blackFormula(payoff, 0.01, 0.3, discount, 0.03);
+    QL_CHECK_CLOSE_FRACTION(
+        blackFormulaImpliedStdDevLetsBeRational(payoff, 0.01, price, discount, 0.03),
+        blackFormulaImpliedStdDevLetsBeRational(Option::Put, -0.005, 0.01, price, discount, 0.03),
+        1e-14);
+}
+
+BOOST_AUTO_TEST_CASE(testLetsBeRationalEdgeCases) {
+
+    BOOST_TEST_MESSAGE("Testing Let's Be Rational implied standard deviation "
+                       "in edge cases...");
+
+    const Real forward = 100.0, discount = 0.9;
+
+    // at the intrinsic value, including zero-priced out-of-the-money options
+    BOOST_CHECK_EQUAL(blackFormulaImpliedStdDevLetsBeRational(Option::Call, 80.0, forward,
+                                                              discount * 20.0, discount),
+                      0.0);
+    BOOST_CHECK_EQUAL(blackFormulaImpliedStdDevLetsBeRational(Option::Put, 120.0, forward,
+                                                              discount * 20.0, discount),
+                      0.0);
+    BOOST_CHECK_EQUAL(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, 120.0, forward, 0.0, discount), 0.0);
+    BOOST_CHECK_EQUAL(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Put, forward, forward, 0.0, discount), 0.0);
+    // a deep in-the-money price that rounds to the intrinsic value
+    const Real deep = blackFormula(Option::Call, 50.0, forward, 0.01, discount);
+    BOOST_CHECK_EQUAL(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, 50.0, forward, deep, discount), 0.0);
+
+    // no solution below the intrinsic value or at the upper bound
+    BOOST_CHECK_THROW(blackFormulaImpliedStdDevLetsBeRational(
+                          Option::Call, 80.0, forward, discount * 20.0 * (1.0 - 1e-10), discount),
+                      Error);
+    BOOST_CHECK_THROW(blackFormulaImpliedStdDevLetsBeRational(Option::Put, 120.0, forward,
+                                                              discount * 19.9, discount),
+                      Error);
+    BOOST_CHECK_THROW(blackFormulaImpliedStdDevLetsBeRational(Option::Call, 80.0, forward,
+                                                              discount * forward, discount),
+                      Error);
+    BOOST_CHECK_THROW(blackFormulaImpliedStdDevLetsBeRational(Option::Put, 80.0, forward,
+                                                              discount * 80.0, discount),
+                      Error);
+    BOOST_CHECK_THROW(blackFormulaImpliedStdDevLetsBeRational(Option::Call, 80.0, forward,
+                                                              discount * forward * 1.01, discount),
+                      Error);
+
+    // invalid inputs
+    BOOST_CHECK_THROW(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, 100.0, forward, -1.0, discount),
+        Error);
+    BOOST_CHECK_THROW(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, 100.0, forward, 5.0, 0.0), Error);
+    BOOST_CHECK_THROW(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, 100.0, forward, 5.0, 1.0, -1.0),
+        Error);
+    BOOST_CHECK_THROW(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, 100.0, -0.01, 5.0, 1.0, 0.01), Error);
+    // with a zero shifted strike the call price does not depend on the volatility
+    BOOST_CHECK_THROW(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, -0.01, 0.02, 0.01, 1.0, 0.01), Error);
+
+    // Close to the money with a tiny standard deviation, the log-moneyness
+    // must be accurate to full relative precision: log(forward/strike) would
+    // give a relative error around 1e-11 here. The prices were computed with
+    // 50-digit arithmetic for the given (double) strike.
+    struct NearTheMoney {
+        Real price, stdDev;
+    };
+    for (const NearTheMoney& c :
+         {NearTheMoney{7.474564014045043e-30, 1e-7}, NearTheMoney{8.331551225004244e-06, 1e-6}}) {
+        const Real implied =
+            blackFormulaImpliedStdDevLetsBeRational(Option::Call, 100.00010000005, 100.0, c.price);
+        QL_CHECK_CLOSE_FRACTION(implied, c.stdDev, 1e-14);
+    }
+
+    // close to the upper bound
+    for (Real stdDev : {8.0, 12.0, 14.0}) {
+        for (auto type : {Option::Call, Option::Put}) {
+            const Real strike = 110.0;
+            const LetsBeRationalCase c =
+                letsBeRationalCase(type, strike, forward, stdDev, discount, 0.0);
+            BOOST_REQUIRE(c.resolvable);
+            const Real implied =
+                blackFormulaImpliedStdDevLetsBeRational(type, strike, forward, c.price, discount);
+            const Real error = std::fabs(implied - stdDev) / stdDev;
+            if (error > 32 * QL_EPSILON * c.conditioning)
+                BOOST_ERROR("failed to recover standard deviation close to the upper bound"
+                            << std::setprecision(17) << "\n type:       " << type
+                            << "\n stdDev:     " << stdDev << "\n implied:    " << implied
+                            << "\n rel. error: " << error);
+        }
+    }
+
+    // deep out of the money, with prices down to about 1e-196, and tiny
+    // standard deviations
+    struct Case {
+        Option::Type type;
+        Real strike, stdDev;
+    };
+    const Case cases[] = {{Option::Call, forward * std::exp(30.0), 1.0},
+                          {Option::Put, forward * std::exp(-30.0), 1.0},
+                          {Option::Call, forward * std::exp(12.0), 0.5},
+                          {Option::Put, forward * std::exp(-0.5), 0.05},
+                          {Option::Call, forward, 1e-8},
+                          {Option::Put, forward * (1.0 - 1e-7), 1e-6}};
+    for (const Case& c : cases) {
+        const LetsBeRationalCase lbr =
+            letsBeRationalCase(c.type, c.strike, forward, c.stdDev, discount, 0.0);
+        BOOST_REQUIRE(lbr.resolvable);
+        const Real implied =
+            blackFormulaImpliedStdDevLetsBeRational(c.type, c.strike, forward, lbr.price, discount);
+        const Real error = std::fabs(implied - c.stdDev) / c.stdDev;
+        if (error > 32 * QL_EPSILON * lbr.conditioning)
+            BOOST_ERROR("failed to recover standard deviation"
+                        << std::setprecision(17) << "\n type:       " << c.type
+                        << "\n strike:     " << c.strike << "\n price:      " << lbr.price
+                        << "\n stdDev:     " << c.stdDev << "\n implied:    " << implied
+                        << "\n rel. error: " << error);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(testLetsBeRationalMovesWithInputs) {
+
+    BOOST_TEST_MESSAGE("Testing that the Let's Be Rational implied standard deviation "
+                       "responds to its inputs...");
+
+    const Real strike = 105.0, forward = 100.0, discount = 0.95, price = 4.0;
+    const Real base =
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, strike, forward, price, discount);
+
+    // higher prices imply higher standard deviations
+    Real previous = 0.0;
+    for (Real p = 0.5; p < 90.0; p += 0.5) {
+        const Real implied =
+            blackFormulaImpliedStdDevLetsBeRational(Option::Call, strike, forward, p, discount);
+        if (!(implied > previous))
+            BOOST_ERROR("implied standard deviation not increasing with price: "
+                        << implied << " at price " << p << " after " << previous);
+        previous = implied;
+    }
+
+    // each input moves the result...
+    const Real lowerDiscount =
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, strike, forward, price, 0.9);
+    const Real higherStrike =
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, 110.0, forward, price, discount);
+    const Real higherForward =
+        blackFormulaImpliedStdDevLetsBeRational(Option::Call, strike, 102.0, price, discount);
+    const Real displaced = blackFormulaImpliedStdDevLetsBeRational(Option::Call, strike, forward,
+                                                                   price, discount, 10.0);
+    BOOST_CHECK(lowerDiscount > base); // same price, larger undiscounted value
+    BOOST_CHECK(higherStrike > base);  // further out of the money
+    BOOST_CHECK(higherForward < base); // closer to the money
+    BOOST_CHECK(displaced < base);     // same price on a larger shifted forward
+
+    // ...consistently with the Black formula
+    QL_CHECK_CLOSE_FRACTION(blackFormula(Option::Call, strike, forward, lowerDiscount, 0.9), price,
+                            1e-12);
+    QL_CHECK_CLOSE_FRACTION(blackFormula(Option::Call, 110.0, forward, higherStrike, discount),
+                            price, 1e-12);
+    QL_CHECK_CLOSE_FRACTION(blackFormula(Option::Call, strike, 102.0, higherForward, discount),
+                            price, 1e-12);
+    QL_CHECK_CLOSE_FRACTION(blackFormula(Option::Call, strike, forward, displaced, discount, 10.0),
+                            price, 1e-12);
+
+    // the put with the same undiscounted time value gives the same result
+    const Real putPrice = price - discount * (forward - strike);
+    QL_CHECK_CLOSE_FRACTION(
+        blackFormulaImpliedStdDevLetsBeRational(Option::Put, strike, forward, putPrice, discount),
+        base, 1e-12);
+}
+
+BOOST_AUTO_TEST_CASE(testLetsBeRationalVersusNewtonSafe) {
+
+    BOOST_TEST_MESSAGE("Testing that Let's Be Rational is at least as accurate as "
+                       "the default Black implied standard deviation...");
+
+    const Real forward = 100.0, discount = 0.97;
+    const Real logMoneyness[] = {-5.0, -3.0, -1.0, -0.5, -0.1, -0.01, 0.0,
+                                 0.01, 0.1,  0.5,  1.0,  3.0,  5.0};
+    const Real stdDevs[] = {1e-4, 1e-3, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 3.0};
+
+    Size compared = 0;
+    // errors in units of the accuracy allowed by the price, eps * conditioning
+    Real maxNormalisedErrorNewton = 0.0, maxNormalisedErrorLbr = 0.0;
+    for (auto type : {Option::Call, Option::Put}) {
+        for (Real x : logMoneyness) {
+            const Real strike = forward * std::exp(-x);
+            for (Real stdDev : stdDevs) {
+                const LetsBeRationalCase c =
+                    letsBeRationalCase(type, strike, forward, stdDev, discount, 0.0);
+                if (!c.resolvable)
+                    continue;
+                Real newton;
+                try {
+                    newton = blackFormulaImpliedStdDev(type, strike, forward, c.price, discount);
+                } catch (Error&) {
+                    continue; // only compare where the existing solver converges
+                }
+                const Real lbr = blackFormulaImpliedStdDevLetsBeRational(type, strike, forward,
+                                                                         c.price, discount);
+                const Real errorNewton = std::fabs(newton - stdDev) / stdDev;
+                const Real errorLbr = std::fabs(lbr - stdDev) / stdDev;
+                ++compared;
+                maxNormalisedErrorNewton =
+                    std::max(maxNormalisedErrorNewton, errorNewton / (QL_EPSILON * c.conditioning));
+                maxNormalisedErrorLbr =
+                    std::max(maxNormalisedErrorLbr, errorLbr / (QL_EPSILON * c.conditioning));
+                // no less accurate, up to what the price resolution allows
+                if (errorLbr > std::max(errorNewton, 32 * QL_EPSILON * c.conditioning))
+                    BOOST_ERROR("Let's Be Rational less accurate than the default solver"
+                                << std::setprecision(17) << "\n type:          " << type
+                                << "\n strike:        " << strike << "\n stdDev:        " << stdDev
+                                << "\n default:       " << newton << "\n LetsBeRational: " << lbr);
+            }
+        }
+    }
+    BOOST_CHECK(compared > 150);
+    // relative to the accuracy that the price allows, the new solver is
+    // within a few ulps everywhere, and better than the default one
+    BOOST_CHECK(maxNormalisedErrorLbr <= 32.0);
+    BOOST_CHECK(maxNormalisedErrorLbr < maxNormalisedErrorNewton);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

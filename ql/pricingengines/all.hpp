@@ -11,6 +11,7 @@
 #include <ql/pricingengines/genericmodelengine.hpp>
 #include <ql/pricingengines/greeks.hpp>
 #include <ql/pricingengines/latticeshortratemodelengine.hpp>
+#include <ql/pricingengines/letsberational.hpp>
 #include <ql/pricingengines/mclongstaffschwartzengine.hpp>
 #include <ql/pricingengines/mcsimulation.hpp>
 

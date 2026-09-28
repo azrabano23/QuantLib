@@ -1584,6 +1584,7 @@
     <ClInclude Include="ql\pricingengines\inflation\all.hpp" />
     <ClInclude Include="ql\pricingengines\inflation\inflationcapfloorengines.hpp" />
     <ClInclude Include="ql\pricingengines\latticeshortratemodelengine.hpp" />
+    <ClInclude Include="ql\pricingengines\letsberational.hpp" />
     <ClInclude Include="ql\pricingengines\lookback\all.hpp" />
     <ClInclude Include="ql\pricingengines\lookback\analyticcontinuousfixedlookback.hpp" />
     <ClInclude Include="ql\pricingengines\lookback\analyticcontinuousfloatinglookback.hpp" />
@@ -2690,6 +2691,7 @@
     <ClCompile Include="ql\pricingengines\futures\discountingperpetualfuturesengine.cpp" />
     <ClCompile Include="ql\pricingengines\greeks.cpp" />
     <ClCompile Include="ql\pricingengines\inflation\inflationcapfloorengines.cpp" />
+    <ClCompile Include="ql\pricingengines\letsberational.cpp" />
     <ClCompile Include="ql\pricingengines\lookback\analyticcontinuousfixedlookback.cpp" />
     <ClCompile Include="ql\pricingengines\lookback\analyticcontinuousfloatinglookback.cpp" />
     <ClCompile Include="ql\pricingengines\lookback\analyticcontinuouspartialfixedlookback.cpp" />

@@ -12,6 +12,7 @@
  Copyright (C) 2017 Klaus Spanderen
  Copyright (C) 2019 Wojciech Ślusarski
  Copyright (C) 2020 Marcin Rybacki
+ Copyright (C) 2026 Azra Bano
 
  This file is part of QuantLib, a free-software/open-source library
  for financial quantitative analysts and developers - http://quantlib.org/
@@ -28,6 +29,7 @@
 */
 
 #include <ql/pricingengines/blackformula.hpp>
+#include <ql/pricingengines/letsberational.hpp>
 #include <ql/math/functional.hpp>
 #include <ql/math/solvers1d/newtonsafe.hpp>
 #include <ql/math/distributions/normaldistribution.hpp>
@@ -557,6 +559,82 @@ namespace QuantLib {
             payoff->optionType(), payoff->strike(),
             forward, blackPrice, discount, displacement,
             guess, omega, accuracy, maxIterations);
+    }
+
+    Real blackFormulaImpliedStdDevLetsBeRational(Option::Type optionType,
+                                                 Real strike,
+                                                 Real forward,
+                                                 Real blackPrice,
+                                                 Real discount,
+                                                 Real displacement) {
+        checkParameters(strike, forward, displacement);
+        QL_REQUIRE(discount > 0.0, "discount (" << discount << ") must be positive");
+        QL_REQUIRE(blackPrice >= 0.0, "option price (" << blackPrice << ") must be non-negative");
+
+        strike += displacement;
+        forward += displacement;
+        QL_REQUIRE(strike > 0.0, "strike + displacement ("
+                                     << strike
+                                     << ") must be positive: the option price "
+                                        "does not depend on the volatility");
+
+        const Real price = blackPrice / discount;
+        const Real intrinsic = std::max(Integer(optionType) * (forward - strike), Real(0.0));
+
+        // A price that rounds to a positive intrinsic value has no resolvable
+        // time value. close_enough() is not used when the intrinsic value is
+        // zero, as it would then treat tiny out-of-the-money prices as zero.
+        if (price == intrinsic || (intrinsic > 0.0 && close_enough(price, intrinsic)))
+            return 0.0;
+        QL_REQUIRE(price > intrinsic,
+                   "option price (" << blackPrice << ") is below the discounted intrinsic value ("
+                                    << intrinsic * discount << "). No solution exists for "
+                                    << optionType << " strike " << strike - displacement
+                                    << ", forward " << forward - displacement << ", discount "
+                                    << discount << ", displacement " << displacement);
+        const Real upperBound = (optionType == Option::Call) ? forward : strike;
+        QL_REQUIRE(price < upperBound,
+                   "option price (" << blackPrice << ") is not below the discounted upper bound ("
+                                    << upperBound * discount << "). No solution exists for "
+                                    << optionType << " strike " << strike - displacement
+                                    << ", forward " << forward - displacement << ", discount "
+                                    << discount << ", displacement " << displacement);
+
+        // Log-moneyness. When strike and forward are within a factor of two
+        // their difference is exact, and log1p keeps the relative accuracy
+        // of x that log(forward/strike) would lose; this matters when the
+        // standard deviation is small compared to |x|.
+        const Real x = (strike <= 2.0 * forward && forward <= 2.0 * strike) ?
+                           std::log1p((forward - strike) / strike) :
+                           std::log(forward / strike);
+
+        // Work with the out-of-the-money option: removing the intrinsic
+        // value here, in price terms, is more accurate than doing it on the
+        // normalised price.
+        Real timeValue = price;
+        Option::Type otmType = optionType;
+        if (Integer(optionType) * x > 0.0) {
+            timeValue = price - intrinsic;
+            otmType = Option::Type(-optionType);
+        }
+
+        const Real stdDev = detail::normalisedImpliedStdDevLetsBeRational(
+            timeValue / (std::sqrt(forward) * std::sqrt(strike)), x, otmType);
+        QL_ENSURE(stdDev >= 0.0 && stdDev < QL_MAX_REAL,
+                  "no implied standard deviation found for "
+                      << optionType << " strike " << strike - displacement << ", forward "
+                      << forward - displacement << ", price " << blackPrice << ", discount "
+                      << discount << ", displacement " << displacement);
+        return stdDev;
+    }
+
+    Real blackFormulaImpliedStdDevLetsBeRational(const ext::shared_ptr<PlainVanillaPayoff>& payoff,
+                                                 Real forward,
+                                                 Real blackPrice,
+                                                 Real discount,
+                                                 Real displacement) {
+        return blackFormulaImpliedStdDevLetsBeRational(payoff->optionType(), payoff->strike(),
+                                                       forward, blackPrice, discount, displacement);
     }
 
 

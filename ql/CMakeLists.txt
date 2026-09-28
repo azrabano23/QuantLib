@@ -736,6 +736,7 @@ set(QL_SOURCES
     pricingengines/forward/mcforwardeuropeanhestonengine.cpp
     pricingengines/futures/discountingperpetualfuturesengine.cpp
     pricingengines/greeks.cpp
+    pricingengines/letsberational.cpp
     pricingengines/inflation/inflationcapfloorengines.cpp
     pricingengines/lookback/analyticcontinuousfixedlookback.cpp
     pricingengines/lookback/analyticcontinuousfloatinglookback.cpp
@@ -2001,6 +2002,7 @@ set(QL_HEADERS
     pricingengines/greeks.hpp
     pricingengines/inflation/inflationcapfloorengines.hpp
     pricingengines/latticeshortratemodelengine.hpp
+    pricingengines/letsberational.hpp
     pricingengines/lookback/analyticcontinuousfixedlookback.hpp
     pricingengines/lookback/analyticcontinuousfloatinglookback.hpp
     pricingengines/lookback/analyticcontinuouspartialfixedlookback.hpp
